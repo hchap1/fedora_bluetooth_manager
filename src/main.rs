@@ -1,31 +1,23 @@
-use std::process::{Command, Stdio};
-use std::io::{Write, BufReader, BufRead};
-use std::time::Duration;
-use std::thread::sleep;
+mod application;
+mod bluetooth;
+mod utility;
+
+use ratatui::DefaultTerminal;
+use application::event_loop;
+use bluetooth::Device;
+use utility::*;
+
+use std::thread::spawn;
 
 fn main() {
-    let mut output = Command::new("bluetoothctl")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn().expect("Err.");
+    let devices: AMV<Device> = sync(vec![]);
+    let user_input: AMV<char> = sync(vec![]);
+    let running: AM<bool> = sync(true);
+    let execute: AM<bool> = sync(false);
+    let terminal: AM<DefaultTerminal> = sync(ratatui::init());
 
-    let interface = match output.stdin.as_mut() {
-        Some(interface) => interface,
-        None => return
-    };
+    let event_handle = spawn(move || event_loop(terminal.clone(), devices.clone(), user_input.clone(), running.clone(), execute.clone()));
+    let _ = event_handle.join();
 
-    let _ = interface.write_all(b"scan on\n");
-    sleep(Duration::from_secs(5));
-
-    let stdout = match output.stdout.as_mut() {
-        Some(stdout) => stdout,
-        None => return
-    };
-
-    let _ = interface.write_all(b"exit\n");
-
-    println!("Waiting for process to exit.");
-    let _ = output.wait();
-    println!("Process exiting.");
+    ratatui::restore();
 }
