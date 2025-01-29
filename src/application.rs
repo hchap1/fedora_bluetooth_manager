@@ -1,35 +1,73 @@
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::Stylize,
+    Frame,
+    layout::{Constraint, Layout},
+    style::{Stylize, Style, Modifier},
     symbols::border,
     text::{Line, Text},
-    widgets::{Block, Paragraph, Widget},
+    widgets::{Block, Paragraph, List},
     DefaultTerminal
 };
-use std::thread::{spawn, JoinHandle};
-use crate::bluetooth::{Device, DeviceType};
-use crate::utility::{AM, AMV, sync};
 
-fn render_frame(area: Rect, buffer: &mut Buffer, devices: &Vec<Device>, user_input: &Vec<char>) {
+use crate::bluetooth::{Device, DeviceType};
+use crate::utility::{AM, AMV};
+const SELECTED_STYLE: Style = Style::new().bg(ratatui::style::Color::Red).add_modifier(Modifier::BOLD);
+
+fn render_frame(frame: &mut Frame, devices: &Vec<Device>, user_input: &Vec<char>) {
+    let layout = Layout::default()
+        .direction(ratatui::layout::Direction::Horizontal)
+        .constraints(vec![
+            Constraint::Percentage(60),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20)
+        ]).split(frame.area());
+
+    let mut paired: Vec<usize> = vec![];
+    let mut available: Vec<usize> = vec![];
+    let mut connected: Vec<usize> = vec![];
+
+    for (idx, device) in devices.iter().enumerate() {
+        if device.connected { connected.push(idx); }
+        else if device.paired { paired.push(idx); }
+        else { available.push(idx); }
+    }
+
     let title = Line::from(" [RUST BLUETOOTH MANAGER] ").bold().centered().blue();
+    let available_title = Line::from(" [AVAILABLE DEVICES] ").bold().centered().white();
+    let paired_title = Line::from(" [PAIRED DEVICES] ").bold().centered().yellow();
+    let connected_title = Line::from(" [CONNECTED DEVICES] ").bold().centered().green();
     let input = Line::from(format!(" > {} ", user_input.iter().collect::<String>())).green();
-    let device_list = Text::from(
-        devices.iter().filter(|device| device.devicetype == DeviceType::Device).map(|device| Line::from(vec![
-            "DEVICE: ".green(),
-            device.name.to_string().white()
+
+    let available_list = available.iter().filter(|idx| devices[**idx].devicetype == DeviceType::Device).map(|idx| Line::from(vec![
+            format!("DEVICE {}: ", idx).white(),
+            devices[*idx].name.to_string().white()
+        ])).collect::<Vec<Line>>();
+
+    let paired_list = Text::from(
+        paired.iter().filter(|idx| devices[**idx].devicetype == DeviceType::Device).map(|idx| Line::from(vec![
+            format!("DEVICE {}: ", idx).yellow(),
+            devices[*idx].name.to_string().white()
         ])).collect::<Vec<Line>>()
     );
-    let block = Block::bordered().title(title).title_bottom(input).border_set(border::THICK);
-    Paragraph::new(device_list).centered().block(block).render(area, buffer);
+
+    let connected_list = Text::from(
+        connected.iter().filter(|idx| devices[**idx].devicetype == DeviceType::Device).map(|idx| Line::from(vec![
+            format!("DEVICE {}: ", idx).green(),
+            devices[*idx].name.to_string().white()
+        ])).collect::<Vec<Line>>()
+    );
+    let l = List::new(available_list).block(Block::bordered().title(available_title).border_set(border::THICK)).highlight_style(SELECTED_STYLE);
+
+    frame.render_widget(l, layout[0]);
+    frame.render_widget(Paragraph::new(paired_list).centered().block(Block::bordered().title(paired_title).title_bottom(input).border_set(border::THICK)), layout[1]);
+    frame.render_widget(Paragraph::new(connected_list).centered().block(Block::bordered().title(connected_title).border_set(border::THICK)), layout[2]);
 }
 
-fn update_screen(terminal: AM<DefaultTerminal>, devices: AMV<Device>, user_input: AMV<char>) -> Result<(), std::io::Error> {
+pub fn update_screen(terminal: AM<DefaultTerminal>, devices: AMV<Device>, user_input: AMV<char>) -> Result<(), std::io::Error> {
     let mut terminal = terminal.lock().unwrap();
     let devices = devices.lock().unwrap();
     let user_input = user_input.lock().unwrap();
-    match terminal.draw(|frame| render_frame(frame.area(), frame.buffer_mut(), &devices, &user_input)) {
+    match terminal.draw(|frame| render_frame(frame, &devices, &user_input)) {
         Ok(_) => Ok(()),
         Err(e) => Err(e)
     }

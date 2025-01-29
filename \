@@ -4,7 +4,6 @@ use std::thread::{sleep, spawn};
 use std::time::Duration;
 use ratatui::DefaultTerminal;
 use std::mem::replace;
-use regex::Regex;
 
 use crate::utility::*;
 use crate::application::update_screen;
@@ -25,8 +24,38 @@ pub struct Device {
     pub connected: bool
 }
 
+fn execute_bluetoothctl_command(command: String) -> Vec<String> {
+    let device_output = Command::new(format!("bluetoothctl {command}"))
+        .args(command.split(" ").map(|x| x.to_string()).collect::<Vec<String>>())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("Err when reading devices.");
+
+    if device_output.status.success() {
+        let stdout = String::from_utf8_lossy(&device_output.stdout);
+        for line in stdout.lines() {
+            let components = line.split(' ').map(|x| x.to_string()).collect::<Vec<String>>();
+            if components.len() < 3 { continue; }
+            {
+                let mut devices = devices.lock().unwrap();       
+                devices.push(
+                    Device {
+                        devicetype: DeviceType::Device,
+                        addr: components[1].clone(),
+                        changelog: vec![],
+                        name: components.iter().skip(2).map(|x| x.clone()).collect::<Vec<String>>().join(" "),
+                        paired: true,
+                        connected: false
+                    }
+                )
+            }
+        }
+    }
+}
+
 fn read(terminal: AM<DefaultTerminal>, devices: AMV<Device>, user_input: AMV<char>, running: AM<bool>, stdout: &mut ChildStdout) {
-    let r = Regex::new("^..-..-..-..-..-..$").unwrap();
     for line in BufReader::new(stdout).lines() {
         {
             let running = running.lock().unwrap();
@@ -43,7 +72,7 @@ fn read(terminal: AM<DefaultTerminal>, devices: AMV<Device>, user_input: AMV<cha
                 return;
             }
         };
-        
+
         if components.len() > 5 {
             while components.len() > 5 {
                 let last = components.pop().unwrap();
@@ -67,10 +96,6 @@ fn read(terminal: AM<DefaultTerminal>, devices: AMV<Device>, user_input: AMV<cha
 
                     let mut add: bool = true;
 
-                    if r.is_match(&device.name) {
-                        add = false;
-                    }
-
                     for d in devices.iter() {
                         if d.addr == device.addr {
                             add = false;
@@ -91,26 +116,9 @@ fn read(terminal: AM<DefaultTerminal>, devices: AMV<Device>, user_input: AMV<cha
     }
 }
 
-fn exec_bctl(args: Vec<String>) -> Result<Vec<String>, ()> {
-    let output = Command::new("bluetoothctl").args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).output().expect("Failed to execute command.");
-    
-    match output.status.success() {
-        true => Ok(output.stdout.lines().into_iter().map(|x| x.unwrap().to_string()).collect()),
-        false => Err(())
-    }
-}
-
 pub fn bluetooth(terminal: AM<DefaultTerminal>, devices: AMV<Device>, user_input: AMV<char>, running: AM<bool>, execute: AM<bool>) {
-    
-
-    let _ = exec_bctl(vec!["power off".into()]);
-    let _ = exec_bctl(vec!["power on".into()]);
-    let _ = exec_bctl(vec!["agent on".into()]);
-    let _ = exec_bctl(vec!["default-agent".into()]);
-
     let device_output = Command::new("bluetoothctl")
         .arg("devices")
-        .arg("Paired")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -149,9 +157,13 @@ pub fn bluetooth(terminal: AM<DefaultTerminal>, devices: AMV<Device>, user_input
         None => return
     };
 
+    let _ = interface.write_all(b"discoverable off\n");
+    let _ = interface.write_all(b"pairable off\n");
+    let _ = interface.write_all(b"scan off\n");
+    let _ = interface.write_all(b"power off\n");
+
     let _ = interface.write_all(b"power on\n");
     let _ = interface.write_all(b"pairable on\n");
-    let _ = interface.write_all(b"discoverable on\n");
     let _ = interface.write_all(b"scan on\n");
 
     let mut stdout = match output.stdout.take() {
@@ -197,56 +209,21 @@ pub fn bluetooth(terminal: AM<DefaultTerminal>, devices: AMV<Device>, user_input
                     }
                     2 => {
                         match command[0].as_str() {
-                            "pair" => {
-                                let device = match command[1].parse::<usize>() {
-                                    Ok(device) => device,
-                                    Err(_) => continue
-                                };
-                                let mut devices = devices.lock().unwrap();
-                                if device >= devices.len() {
-                                    continue;
-                                }
-
-                                let mac_address = devices[device].addr.clone();
-                                let _ = interface.write_all(format!("pair {mac_address}\n").as_bytes());
-                                devices[device].paired = true;
-                            }
                             "connect" => {
                                 let device = match command[1].parse::<usize>() {
                                     Ok(device) => device,
                                     Err(_) => continue
                                 };
-                                let mut devices = devices.lock().unwrap();
+                                let devices = devices.lock().unwrap();
                                 if device >= devices.len() {
                                     continue;
                                 }
 
                                 let mac_address = devices[device].addr.clone();
-                                let _ = interface.write_all(format!("connect {mac_address}\n").as_bytes());
-                                devices[device].connected = true;
-                            }
-                            "remove" => {
-                                let device = match command[1].parse::<usize>() {
-                                    Ok(device) => device,
-                                    Err(_) => continue
-                                };
-                                let mut devices = devices.lock().unwrap();
-                                if device >= devices.len() {
-                                    continue;
-                                }
-
-                                let mac_address = devices[device].addr.clone();
-                                let _ = interface.write_all(format!("remove {mac_address}\n").as_bytes());
-                                devices[device].connected = false;
-                                devices[device].paired = false;
-                                devices.clear();
-                                let _ = interface.write_all(b"scan off\n");
-                                let _ = interface.write_all(b"agent off\n");
-                                let _ = interface.write_all(b"power off\n");
-                                let _ = interface.write_all(b"power on\n");
-                                let _ = interface.write_all(b"agent on\n");
-                                let _ = interface.write_all(b"default-agent\n");
-                                let _ = interface.write_all(b"scan on\n");
+                                let _ = interface.write_all(format!("pair {mac_address}").as_bytes());
+                                sleep(Duration::from_secs(1));
+                                let _ = interface.write_all(b"scan off");
+                                let _ = interface.write_all(format!("connect {mac_address}").as_bytes());
                             }
                             &_ => {}
                         }
